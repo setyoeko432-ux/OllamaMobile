@@ -1,0 +1,30 @@
+# Android Studio / IntelliJ IDEA artifacts
+.idea/
+*.iml
+.gradle/
+build/
+local.properties
+
+# Android specific
+app/build/
+.cxx/
+
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# App Workspace Sandbox Backup
+gateway/workspace/
+gateway/*.bak
+*.bak
+
+# Miscellaneous
+*.log
+.DS_Store
+Captures/
