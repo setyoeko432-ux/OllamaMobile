@@ -1,0 +1,15 @@
+{
+  "roots": [
+    {
+      "alias": "workspace",
+      "path": "./workspace",
+      "description": "Workspace utama",
+      "read_only": false
+    }
+  ],
+  "exclusions": [
+    ".git", ".gradle", ".idea", "node_modules", "build", "dist", "out", "target",
+    "__pycache__", ".venv", "venv", "coverage", "AppData", "Windows", "Program Files",
+    "Program Files (x86)", "$Recycle.Bin", "System Volume Information"
+  ]
+}

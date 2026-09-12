@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("settings", 0)
@@ -22,6 +23,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val status = _status.asStateFlow()
     private val _toolActivity = MutableStateFlow("")
     val toolActivity = _toolActivity.asStateFlow()
+
+    private val _roots = MutableStateFlow<List<FileRoot>>(emptyList())
+    val roots = _roots.asStateFlow()
+    private val _scanStatuses = MutableStateFlow<Map<String, String>>(emptyMap())
+    val scanStatuses = _scanStatuses.asStateFlow()
+    private val _pendingEdit = MutableStateFlow<PendingEdit?>(null)
+    val pendingEdit = _pendingEdit.asStateFlow()
 
     private fun loadSettings() = AppSettings(
         prefs.getString("url", "http://192.168.1.2:8765")!!,
@@ -46,32 +54,93 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val selected = _settings.value.model.takeIf { it in list } ?: list.firstOrNull().orEmpty()
                 saveSettings(_settings.value.copy(model = selected))
                 _status.value = if (list.isEmpty()) "Terhubung, belum ada model" else "Terhubung"
+                fetchRoots()
             }
             .onFailure { _status.value = "Gagal: ${it.message ?: "periksa alamat"}" }
     }
 
-    fun clear() { _messages.value = emptyList(); _toolActivity.value = "" }
+    fun fetchRoots() = viewModelScope.launch {
+        runCatching { client.getRoots(_settings.value) }
+            .onSuccess { (list, statuses) ->
+                _roots.value = list
+                _scanStatuses.value = statuses
+            }
+    }
+
+    fun scanRoot(alias: String) = viewModelScope.launch {
+        runCatching { client.scanRoot(_settings.value, alias) }
+            .onSuccess { fetchRoots() }
+    }
+
+    fun respondToEdit(approve: Boolean) = viewModelScope.launch {
+        val edit = _pendingEdit.value ?: return@launch
+        _busy.value = true
+        runCatching { client.respondToEdit(_settings.value, edit.editId, approve) }
+            .onSuccess { msg ->
+                _messages.value = _messages.value + ChatMessage(role = "assistant", content = "Hasil edit: $msg")
+                _pendingEdit.value = null
+            }
+            .onFailure {
+                _messages.value = _messages.value + ChatMessage(role = "assistant", content = "Gagal edit: ${it.message}")
+                _pendingEdit.value = null
+            }
+        _busy.value = false
+    }
+
+    fun clear() {
+        _messages.value = emptyList()
+        _toolActivity.value = ""
+        _pendingEdit.value = null
+    }
+
+    private fun updateLastMessage(content: String, isStreaming: Boolean, error: String? = null) {
+        val list = _messages.value.toMutableList()
+        if (list.isNotEmpty() && list.last().role == "assistant") {
+            list[list.size - 1] = list.last().copy(content = content, isStreaming = isStreaming, error = error)
+            _messages.value = list
+        }
+    }
 
     fun send(text: String) {
         if (text.isBlank() || _busy.value || _settings.value.model.isBlank()) return
-        val base = _messages.value + ChatMessage("user", text.trim())
-        _messages.value = base + ChatMessage("assistant", "")
+        val userMsg = ChatMessage(role = "user", content = text.trim())
+        val assistantMsg = ChatMessage(role = "assistant", content = "", isStreaming = true)
+        val base = _messages.value + userMsg
+        _messages.value = base + assistantMsg
         _busy.value = true
         _toolActivity.value = ""
+        _pendingEdit.value = null
+
+        var currentContent = ""
+        var lastUpdate = 0L
+
         viewModelScope.launch {
             runCatching {
                 client.chat(_settings.value, base) { type, payload ->
-                    viewModelScope.launch {
-                        when (type) {
-                            "token" -> _messages.value = _messages.value.dropLast(1) +
-                                _messages.value.last().copy(content = _messages.value.last().content + payload)
-                            "tool" -> _toolActivity.value = payload
-                            "error" -> _messages.value = _messages.value.dropLast(1) + ChatMessage("assistant", "Error: $payload")
+                    when (type) {
+                        "token" -> {
+                            currentContent += payload
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdate > 100) {
+                                lastUpdate = now
+                                updateLastMessage(currentContent, true)
+                            }
+                        }
+                        "tool" -> _toolActivity.value = payload
+                        "edit" -> {
+                            val json = JSONObject(payload)
+                            _pendingEdit.value = PendingEdit(json.getString("edit_id"), json.getString("diff"))
+                        }
+                        "error" -> {
+                            updateLastMessage(currentContent, false, payload)
+                        }
+                        "done" -> {
+                            updateLastMessage(currentContent, false)
                         }
                     }
                 }
             }.onFailure {
-                _messages.value = _messages.value.dropLast(1) + ChatMessage("assistant", "Tidak dapat terhubung: ${it.message}")
+                updateLastMessage(currentContent, false, it.message)
             }
             _busy.value = false
         }

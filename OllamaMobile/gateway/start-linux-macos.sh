@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 set -e
 cd "$(dirname "$0")"
-python3 server.py --workspace "$HOME/OllamaWorkspace"
+echo "Memulai Ollama Mobile Gateway..."
+python3 server.py
