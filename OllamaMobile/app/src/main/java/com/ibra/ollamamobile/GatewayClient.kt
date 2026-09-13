@@ -87,7 +87,9 @@ class GatewayClient {
     fun chatStream(
         settings: AppSettings,
         messages: List<ChatMessage>,
-        requestId: String
+        requestId: String,
+        assistantMessageId: String,
+        conversationId: String
     ): Call {
         val items = JSONArray()
         messages.forEach {
@@ -104,7 +106,8 @@ class GatewayClient {
             .put("output_token_limit", settings.outputTokenLimit)
             .put("thread_mode", settings.threadMode)
             .put("keep_alive_duration", settings.keepAliveDuration)
-            .put("conversation_id", "default_conv") // Can be unique identifier per thread
+            .put("conversation_id", conversationId)
+            .put("assistant_message_id", assistantMessageId)
 
         val request = requestBuilder("${settings.gatewayUrl.trimEnd('/')}/chat", settings.token)
             .post(body.toString().toRequestBody(jsonMediaType))
@@ -124,6 +127,44 @@ class GatewayClient {
         val body = JSONObject().put("request_id", requestId)
         
         val request = requestBuilder("${settings.gatewayUrl.trimEnd('/')}/edits/$encodedId/$action", settings.token)
+            .post(body.toString().toRequestBody(jsonMediaType))
+            .build()
+
+        return client.newCall(request)
+    }
+
+    suspend fun getWorkspace(settings: AppSettings): List<JSONObject> = withContext(Dispatchers.IO) {
+        val request = requestBuilder("${settings.gatewayUrl.trimEnd('/')}/workspace", settings.token).get().build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            val arr = JSONArray(response.body?.string() ?: "[]")
+            (0 until arr.length()).map { arr.getJSONObject(it) }
+        }
+    }
+
+    suspend fun searchMetadata(settings: AppSettings, query: String): List<JSONObject> = withContext(Dispatchers.IO) {
+        val encodedQ = java.net.URLEncoder.encode(query, "UTF-8")
+        val request = requestBuilder("${settings.gatewayUrl.trimEnd('/')}/search?query=$encodedQ", settings.token).get().build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            val arr = JSONArray(response.body?.string() ?: "[]")
+            (0 until arr.length()).map { arr.getJSONObject(it) }
+        }
+    }
+
+    fun respondToApprovalStream(
+        settings: AppSettings,
+        approvalId: String,
+        approve: Boolean,
+        requestId: String
+    ): Call {
+        val action = "respond"
+        val encodedId = java.net.URLEncoder.encode(approvalId, "UTF-8")
+        val body = JSONObject()
+            .put("approve", approve)
+            .put("request_id", requestId)
+        
+        val request = requestBuilder("${settings.gatewayUrl.trimEnd('/')}/approval/$encodedId/$action", settings.token)
             .post(body.toString().toRequestBody(jsonMediaType))
             .build()
 

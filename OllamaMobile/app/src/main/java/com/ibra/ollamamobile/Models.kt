@@ -1,5 +1,7 @@
 package com.ibra.ollamamobile
 
+import org.json.JSONObject
+
 enum class ChatMode { CHAT, AGENT }
 
 enum class GenerationState {
@@ -67,4 +69,10 @@ data class AppSettings(
 
 data class FileRoot(val name: String, val description: String, val access: String)
 data class PendingEdit(val editId: String, val diff: String)
+
+data class PendingApproval(
+    val approvalId: String,
+    val operation: String,
+    val payload: JSONObject
+)
 

@@ -1,15 +1,30 @@
 {
-  "roots": [
-    {
-      "alias": "workspace",
-      "path": "./workspace",
-      "description": "Workspace utama",
-      "read_only": false
-    }
-  ],
+  "discovery": {
+    "auto_detect_fixed_drives": true,
+    "allowed_drives": ["C:/", "D:/"],
+    "metadata_indexing": true,
+    "content_indexing": false,
+    "read_regular_files": true,
+    "sensitive_read_requires_approval": true
+  },
+  "workspace": {
+    "path": "./workspace",
+    "allow_create": true,
+    "edit_requires_approval": true,
+    "delete_requires_approval": true
+  },
+  "import_policy": {
+    "default_operation": "copy",
+    "allow_move": false,
+    "allow_source_delete": false,
+    "require_confirmation": true,
+    "max_file_size_mb": 100,
+    "collision_policy": "rename"
+  },
   "exclusions": [
     ".git", ".gradle", ".idea", "node_modules", "build", "dist", "out", "target",
     "__pycache__", ".venv", "venv", "coverage", "AppData", "Windows", "Program Files",
-    "Program Files (x86)", "$Recycle.Bin", "System Volume Information"
+    "Program Files (x86)", "$Recycle.Bin", "System Volume Information",
+    "Recovery", "$RECYCLE.BIN", "pagefile.sys", "hiberfil.sys", "swapfile.sys"
   ]
 }

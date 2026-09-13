@@ -12,6 +12,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -32,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import org.json.JSONObject
 
 private val Ink = Color(0xFF242422)
 private val Canvas = Color(0xFFF7F7F5)
@@ -40,11 +44,18 @@ private val Accent = Color(0xFF2783DE)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Accent, background = Canvas)) { App() } }
+        setContent {
+            MaterialTheme(colorScheme = lightColorScheme(primary = Accent, background = Canvas)) {
+                Surface(modifier = Modifier.fillMaxSize(), color = Canvas) {
+                    val vm: MainViewModel = viewModel()
+                    App(vm)
+                }
+            }
+        }
     }
 }
 
-@Composable fun App(vm: MainViewModel = androidx.lifecycle.viewmodel.compose.viewModel()) {
+@Composable fun App(vm: MainViewModel) {
     val messages by vm.messages.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val models by vm.models.collectAsStateWithLifecycle()
@@ -55,10 +66,14 @@ class MainActivity : ComponentActivity() {
     val roots by vm.roots.collectAsStateWithLifecycle()
     val scanStatuses by vm.scanStatuses.collectAsStateWithLifecycle()
     val pendingEdit by vm.pendingEdit.collectAsStateWithLifecycle()
+    val pendingApproval by vm.pendingApproval.collectAsStateWithLifecycle()
     val telemetry by vm.telemetry.collectAsStateWithLifecycle()
     
+    val workspaceFiles by vm.workspaceFiles.collectAsStateWithLifecycle()
+    val searchResults by vm.searchResults.collectAsStateWithLifecycle()
+    
     var showSettings by remember { mutableStateOf(false) }
-    var showFolders by remember { mutableStateOf(false) }
+    var showLocalFiles by remember { mutableStateOf(false) }
     var showTelDetails by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
 
@@ -108,7 +123,11 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
-                    IconButton(onClick = { showFolders = true }) { Icon(Icons.Outlined.Folder, "Folder AI") }
+                    IconButton(onClick = { 
+                        showLocalFiles = true 
+                        vm.fetchRoots()
+                        vm.fetchWorkspace()
+                    }) { Icon(Icons.Outlined.Folder, "Local Files") }
                     IconButton(onClick = vm::clear) { Icon(Icons.Outlined.Add, "Chat baru") }
                     IconButton(onClick = { showSettings = true }) { Icon(Icons.Outlined.Settings, "Pengaturan") }
                 }
@@ -234,12 +253,80 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    if (showSettings) SettingsSheet(settings, models, status, onDismiss = { showSettings=false }, onSave = { vm.saveSettings(it); showSettings=false; vm.connect() }, onTest = { vm.connect() })
-    if (showFolders) FoldersSheet(roots, scanStatuses, onDismiss = { showFolders=false }, onScan = vm::scanRoot)
+    if (showSettings) SettingsSheet(settings, models, status, onDismiss = { showSettings=false }, onSave = { vm.saveSettings(it); showSettings=false; vm.connect() }, onTest = vm::testConnection)
+    if (showLocalFiles) LocalFilesSheet(
+        roots = roots,
+        scanStatuses = scanStatuses,
+        workspaceFiles = workspaceFiles,
+        searchResults = searchResults,
+        onDismiss = { showLocalFiles = false },
+        onScan = vm::scanRoot,
+        onSearch = vm::searchFiles
+    )
     
     pendingEdit?.let { edit ->
-        EditConfirmationDialog(edit, onApprove = { vm.respondToEdit(true) }, onReject = { vm.respondToEdit(false) })
+        EditConfirmationDialog(edit, onApprove = { vm.respondToApproval(true) }, onReject = { vm.respondToApproval(false) })
     }
+
+    pendingApproval?.let { approval ->
+        ApprovalDialog(approval, onApprove = { vm.respondToApproval(true) }, onReject = { vm.respondToApproval(false) })
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable fun ApprovalDialog(approval: PendingApproval, onApprove:()->Unit, onReject:()->Unit) {
+    val payload = approval.payload
+    val op = approval.operation
+    
+    AlertDialog(onDismissRequest = {}, confirmButton = {
+        Button(onClick = onApprove, colors = ButtonDefaults.buttonColors(containerColor = if (op == "workspace_edit") Accent else Color(0xFF35845C))) { 
+            Text(if (op == "copy_to_workspace") "Salin File" else "Setujui") 
+        }
+    }, dismissButton = {
+        TextButton(onClick = onReject) { Text("Tolak") }
+    }, title = { 
+        Text(when(op) {
+            "read_source_file" -> "Persetujuan Baca File"
+            "copy_to_workspace" -> "Salin ke Workspace"
+            "workspace_edit" -> "Edit Workspace"
+            else -> "Persetujuan Diperlukan"
+        })
+    }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val sensitivity = payload.optString("sensitivity", "NORMAL")
+            if (sensitivity != "NORMAL") {
+                Surface(color = Color(0xFFFFF4E5), shape = RoundedCornerShape(8.dp)) {
+                    Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Warning, null, tint = Color(0xFF663C00), modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("File Sensitif ($sensitivity)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF663C00), fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            
+            Text(payload.optString("reason", "AI memerlukan akses."), style = MaterialTheme.typography.bodyMedium)
+            
+            when(op) {
+                "copy_to_workspace" -> {
+                    Text("Sumber: ${payload.optString("source_display")}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Text("Tujuan: ${payload.optString("destination_relative")}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Text("Ukuran: ${payload.optLong("size") / 1024} KB", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                }
+                "workspace_edit" -> {
+                    Text("File: ${payload.optString("path")}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    // Show diff if available
+                    val diff = payload.optString("diff")
+                    if (diff.isNotBlank()) {
+                        Surface(color = Color(0xFFF7F7F7), shape = RoundedCornerShape(4.dp), border = BorderStroke(1.dp, Color.LightGray)) {
+                            Text(diff, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(4.dp).heightIn(max = 100.dp).verticalScroll(rememberScrollState()))
+                        }
+                    }
+                }
+            }
+            
+            Text("Operasi ini dilakukan secara lokal di laptop Anda.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+        }
+    })
 }
 
 @Composable fun EmptyState(modifier: Modifier = Modifier) = Box(modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.Center) {
@@ -338,46 +425,105 @@ class MainActivity : ComponentActivity() {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable fun FoldersSheet(roots: List<FileRoot>, statuses: Map<String, String>, onDismiss:()->Unit, onScan:(String)->Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().padding(24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Folder AI (Approved Roots)", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            if (roots.isEmpty()) {
-                Text("Belum ada folder yang dikonfigurasi di gateway.", color = Color.Gray)
+@Composable fun LocalFilesSheet(
+    roots: List<FileRoot>,
+    scanStatuses: Map<String, String>,
+    workspaceFiles: List<JSONObject>,
+    searchResults: List<JSONObject>,
+    onDismiss: () -> Unit,
+    onScan: (String) -> Unit,
+    onSearch: (String) -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    var activeTab by remember { mutableStateOf(0) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.fillMaxHeight(0.9f)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+            Text("Akses File Lokal", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(16.dp))
+            
+            TabRow(selectedTabIndex = activeTab, containerColor = Color.Transparent) {
+                Tab(selected = activeTab == 0, onClick = { activeTab = 0 }) { Text("Discovery", modifier = Modifier.padding(12.dp)) }
+                Tab(selected = activeTab == 1, onClick = { activeTab = 1 }) { Text("Search", modifier = Modifier.padding(12.dp)) }
+                Tab(selected = activeTab == 2, onClick = { activeTab = 2 }) { Text("Workspace", modifier = Modifier.padding(12.dp)) }
             }
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxWidth().weight(1f, fill = false)
-            ) {
-                items(roots) { root ->
-                    val status = statuses[root.name] ?: "idle"
-                    val isRunning = status == "running"
-                    Surface(color = Color.White, shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Color(0xFFF0F0F0))) {
-                        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(root.name, fontWeight = FontWeight.SemiBold)
-                                Text(root.description, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                                    Icon(
-                                        if (root.access == "read-only") Icons.Outlined.Lock else Icons.Outlined.Edit,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(12.dp),
-                                        tint = Accent
-                                    )
-                                    Spacer(Modifier.width(4.dp))
-                                    Text(root.access, style = MaterialTheme.typography.labelSmall, color = Accent)
+            
+            Spacer(Modifier.height(16.dp))
+            
+            Box(Modifier.weight(1f)) {
+                when (activeTab) {
+                    0 -> {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            items(roots) { root ->
+                                val status = scanStatuses[root.name] ?: "idle"
+                                Card(colors = CardDefaults.cardColors(containerColor = Color.White), border = BorderStroke(1.dp, Color(0xFFF0F0F0))) {
+                                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(root.name, fontWeight = FontWeight.Bold)
+                                            Text("Status: $status", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                        IconButton(onClick = { onScan(root.name) }) {
+                                            if (status == "running") CircularProgressIndicator(Modifier.size(20.dp))
+                                            else Icon(Icons.Outlined.Refresh, null)
+                                        }
+                                    }
                                 }
-                                Text("Status: $status", style = MaterialTheme.typography.labelSmall, color = if (isRunning) Accent else Color.DarkGray, fontWeight = if (isRunning) FontWeight.Bold else FontWeight.Normal)
                             }
-                            IconButton(onClick = { onScan(root.name) }, enabled = !isRunning) { 
-                                if (isRunning) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                                else Icon(Icons.Outlined.Refresh, "Scan")
+                        }
+                    }
+                    1 -> {
+                        Column {
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it; onSearch(it) },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = { Text("Cari file...") },
+                                leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                                singleLine = true
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(searchResults) { file ->
+                                    val sensitivity = file.optString("sensitivity", "NORMAL")
+                                    Card(colors = CardDefaults.cardColors(containerColor = Color.White), border = BorderStroke(1.dp, Color(0xFFEEEEEE))) {
+                                        Column(Modifier.padding(12.dp)) {
+                                            Text(file.optString("filename"), fontWeight = FontWeight.SemiBold)
+                                            Text(file.optString("relative_path"), style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                val color = when(sensitivity) {
+                                                    "NORMAL" -> Color(0xFF35845C)
+                                                    "BLOCKED_SYSTEM" -> Color.Red
+                                                    else -> Color(0xFFE67E22)
+                                                }
+                                                Surface(color = color.copy(alpha = 0.1f), shape = RoundedCornerShape(4.dp)) {
+                                                    Text(sensitivity, color = color, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    2 -> {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(workspaceFiles) { file ->
+                                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF9F9F9))) {
+                                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Outlined.Description, null, tint = Accent)
+                                        Spacer(Modifier.width(12.dp))
+                                        Column {
+                                            Text(file.optString("name"), fontWeight = FontWeight.Medium)
+                                            Text("${file.optLong("size") / 1024} KB", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(32.dp))
         }
     }
 }
