@@ -88,7 +88,11 @@ fun MarkdownMessage(
         },
         modifier = modifier,
         update = { textView ->
-            markwon.setMarkdown(textView, displayMarkdown)
+            if (isStreaming) {
+                textView.text = displayMarkdown
+            } else {
+                markwon.setMarkdown(textView, displayMarkdown)
+            }
         }
     )
 }

@@ -50,13 +50,16 @@ class MainActivity : ComponentActivity() {
     val models by vm.models.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
+    val generationState by vm.generationState.collectAsStateWithLifecycle()
     val tool by vm.toolActivity.collectAsStateWithLifecycle()
     val roots by vm.roots.collectAsStateWithLifecycle()
     val scanStatuses by vm.scanStatuses.collectAsStateWithLifecycle()
     val pendingEdit by vm.pendingEdit.collectAsStateWithLifecycle()
+    val telemetry by vm.telemetry.collectAsStateWithLifecycle()
     
     var showSettings by remember { mutableStateOf(false) }
     var showFolders by remember { mutableStateOf(false) }
+    var showTelDetails by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
 
     val listState = rememberLazyListState()
@@ -92,7 +95,13 @@ class MainActivity : ComponentActivity() {
                     Column(Modifier.weight(1f)) {
                         Text(settings.model.ifBlank { "Ollama Mobile" }, fontWeight = FontWeight.SemiBold, color = Ink)
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(status, style = MaterialTheme.typography.labelSmall, color = if (status.startsWith("Terhubung")) Color(0xFF35845C) else Color.Gray)
+                            val statusColor = when {
+                                status.startsWith("Terhubung") -> Color(0xFF35845C)
+                                status.contains("Gagal") || status.contains("tidak valid") -> Color(0xFFD32F2F)
+                                else -> Color.Gray
+                            }
+                            Text(status, style = MaterialTheme.typography.labelSmall, color = statusColor)
+                            
                             if (status.startsWith("Terhubung")) {
                                 Text(" • ", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                                 Text(settings.chatMode.name, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Accent)
@@ -100,21 +109,64 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     IconButton(onClick = { showFolders = true }) { Icon(Icons.Outlined.Folder, "Folder AI") }
-                        IconButton(onClick = vm::clear) { Icon(Icons.Outlined.Add, "Chat baru") }
-                        IconButton(onClick = { showSettings = true }) { Icon(Icons.Outlined.Settings, "Pengaturan") }
-                    }
+                    IconButton(onClick = vm::clear) { Icon(Icons.Outlined.Add, "Chat baru") }
+                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Outlined.Settings, "Pengaturan") }
                 }
-            },
-            bottomBar = {
-                Surface(color = Color.White, tonalElevation = 1.dp) {
-                    Column(Modifier.navigationBarsPadding().padding(12.dp)) {
-                        if (tool.isNotBlank() && settings.chatMode == ChatMode.AGENT) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
-                                CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp, color = Accent)
-                                Spacer(Modifier.width(8.dp))
-                                Text(tool, style = MaterialTheme.typography.labelSmall, color = Accent)
+            }
+        },
+        bottomBar = {
+            Surface(color = Color.White, tonalElevation = 1.dp) {
+                Column(Modifier.navigationBarsPadding().padding(12.dp)) {
+                    if (telemetry.requestId.isNotBlank()) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                            Text("Metrik Performa", style = MaterialTheme.typography.labelMedium, color = Color.Gray, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { showTelDetails = !showTelDetails }) {
+                                Text(if (showTelDetails) "Sembunyikan" else "Lihat Detail", style = MaterialTheme.typography.labelSmall)
                             }
                         }
+                        if (showTelDetails) {
+                            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF9F9F8)), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                                Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("Context aktif: ${telemetry.selectedNumCtx} token", style = MaterialTheme.typography.labelSmall)
+                                    Text("Alasan pemilihan: ${telemetry.selectionReason}", style = MaterialTheme.typography.labelSmall)
+                                    Text("Estimasi token input: ${telemetry.estimatedInputTokens}", style = MaterialTheme.typography.labelSmall)
+                                    Text("Model status: ${if (telemetry.isWarm) "Warm model" else "Cold start"}", style = MaterialTheme.typography.labelSmall)
+                                    if (telemetry.firstTokenAt > 0) {
+                                        Text("Time to first token (TTFT): ${telemetry.timeToFirstTokenMs} ms", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    if (telemetry.completedAt > telemetry.firstTokenAt && telemetry.tokenCount > 0) {
+                                        Text(String.format("Kecepatan generasi: %.1f tokens/s", telemetry.tokensPerSecond), style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    Text("Memory pressure host: ${telemetry.memoryPressure}", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+
+                    if (busy || generationState != GenerationState.IDLE) {
+                        val stateLabel = when (generationState) {
+                            GenerationState.CONNECTING -> "Menghubungkan ke gateway..."
+                            GenerationState.GENERATING -> "Sedang menulis..."
+                            GenerationState.RUNNING_TOOL -> tool.ifBlank { "Menjalankan tool..." }
+                            GenerationState.WAITING_FOR_APPROVAL -> "Menunggu persetujuan..."
+                            GenerationState.APPLYING_EDIT -> "Menerapkan perubahan..."
+                            GenerationState.RESUMING_AGENT -> "Melanjutkan agent..."
+                            GenerationState.CANCELLED -> "Dibatalkan"
+                            GenerationState.FAILED -> "Gagal"
+                            GenerationState.COMPLETED -> "Selesai"
+                            else -> ""
+                        }
+                        if (stateLabel.isNotBlank()) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
+                                if (busy) {
+                                    CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp, color = Accent)
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                Text(stateLabel, style = MaterialTheme.typography.labelSmall, color = if (generationState == GenerationState.FAILED) Color.Red else Accent)
+                            }
+                        }
+                    }
                         Row(verticalAlignment = Alignment.Bottom) {
                             OutlinedTextField(
                                 value = input,
@@ -385,6 +437,9 @@ class MainActivity : ComponentActivity() {
     var s by remember(initial) { mutableStateOf(initial) }
     var expanded by remember { mutableStateOf(false) }
     var showToken by remember { mutableStateOf(false) }
+    var perfExpanded by remember { mutableStateOf(false) }
+    var ctxExpanded by remember { mutableStateOf(false) }
+    var threadExpanded by remember { mutableStateOf(false) }
 
     LaunchedEffect(s.chatMode) {
         if (s.chatMode == ChatMode.CHAT) {
@@ -438,6 +493,54 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            Text("Pengaturan Performa", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+
+            ExposedDropdownMenuBox(perfExpanded, { perfExpanded=!perfExpanded }) {
+                OutlinedTextField(s.performanceMode, {}, readOnly=true, label={Text("Performance Mode")}, trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(perfExpanded)}, modifier=Modifier.menuAnchor().fillMaxWidth())
+                ExposedDropdownMenu(perfExpanded, {perfExpanded=false}) {
+                    listOf("AUTO", "FAST", "BALANCED", "LONG_CONTEXT", "CUSTOM").forEach { mode ->
+                        DropdownMenuItem({Text(mode)}, { s=s.copy(performanceMode=mode); perfExpanded=false })
+                    }
+                }
+            }
+
+            ExposedDropdownMenuBox(ctxExpanded, { ctxExpanded=!ctxExpanded }) {
+                val displayText = if (s.contextOverride == 0) "Auto" else s.contextOverride.toString()
+                OutlinedTextField(displayText, {}, readOnly=true, label={Text("Context Window")}, trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(ctxExpanded)}, modifier=Modifier.menuAnchor().fillMaxWidth())
+                ExposedDropdownMenu(ctxExpanded, {ctxExpanded=false}) {
+                    listOf(0, 2048, 4048, 8192).forEach { ctxVal ->
+                        val itemLabel = if (ctxVal == 0) "Auto" else ctxVal.toString()
+                        DropdownMenuItem({Text(itemLabel)}, { s=s.copy(contextOverride=ctxVal); ctxExpanded=false })
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = if (s.outputTokenLimit == 0) "" else s.outputTokenLimit.toString(),
+                onValueChange = { s = s.copy(outputTokenLimit = it.toIntOrNull() ?: 0) },
+                label = { Text("Output Token Limit (0 untuk default)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            ExposedDropdownMenuBox(threadExpanded, { threadExpanded=!threadExpanded }) {
+                OutlinedTextField(s.threadMode, {}, readOnly=true, label={Text("Thread CPU Mode")}, trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(threadExpanded)}, modifier=Modifier.menuAnchor().fillMaxWidth())
+                ExposedDropdownMenu(threadExpanded, {threadExpanded=false}) {
+                    listOf("AUTO", "6", "8", "10", "12").forEach { tMode ->
+                        DropdownMenuItem({Text(tMode)}, { s=s.copy(threadMode=tMode); threadExpanded=false })
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = s.keepAliveDuration,
+                onValueChange = { s = s.copy(keepAliveDuration = it) },
+                label = { Text("Keep Model Loaded (e.g., 5m, 15m, 30m, 0)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
 
             Text(status, style=MaterialTheme.typography.labelMedium, color = if (status.contains("Gagal") || status.contains("tidak valid")) Color(0xFFD32F2F) else Color.Unspecified)
             Button(onClick={onSave(s)}, modifier=Modifier.fillMaxWidth().height(50.dp)) { Text("Simpan & Hubungkan") }
