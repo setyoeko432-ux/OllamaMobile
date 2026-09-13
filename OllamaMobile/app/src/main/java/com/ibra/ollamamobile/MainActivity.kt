@@ -16,6 +16,9 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.platform.LocalClipboardManager
 import com.ibra.ollamamobile.ui.MarkdownMessage
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.foundation.horizontalScroll
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -97,30 +100,49 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     IconButton(onClick = { showFolders = true }) { Icon(Icons.Outlined.Folder, "Folder AI") }
-                    IconButton(onClick = vm::clear) { Icon(Icons.Outlined.Add, "Chat baru") }
-                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Outlined.Settings, "Pengaturan") }
+                        IconButton(onClick = vm::clear) { Icon(Icons.Outlined.Add, "Chat baru") }
+                        IconButton(onClick = { showSettings = true }) { Icon(Icons.Outlined.Settings, "Pengaturan") }
+                    }
                 }
-            }
-        }, bottomBar = {
-            Surface(color = Color.White, tonalElevation = 1.dp) {
-                Column(Modifier.navigationBarsPadding().padding(12.dp)) {
-                    if (tool.isNotBlank() && settings.chatMode == ChatMode.AGENT) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
-                            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp, color = Accent)
+            },
+            bottomBar = {
+                Surface(color = Color.White, tonalElevation = 1.dp) {
+                    Column(Modifier.navigationBarsPadding().padding(12.dp)) {
+                        if (tool.isNotBlank() && settings.chatMode == ChatMode.AGENT) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
+                                CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp, color = Accent)
+                                Spacer(Modifier.width(8.dp))
+                                Text(tool, style = MaterialTheme.typography.labelSmall, color = Accent)
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            OutlinedTextField(
+                                value = input,
+                                onValueChange = { input = it },
+                                modifier = Modifier.weight(1f),
+                                placeholder = { Text("Kirim pesan…") },
+                                maxLines = 5,
+                                shape = RoundedCornerShape(16.dp),
+                                enabled = !busy || (messages.lastOrNull()?.isStreaming == false)
+                            )
                             Spacer(Modifier.width(8.dp))
-                            Text(tool, style = MaterialTheme.typography.labelSmall, color = Accent)
+                            if (busy) {
+                                FilledIconButton(
+                                    onClick = { vm.stopGeneration() },
+                                    modifier = Modifier.size(52.dp),
+                                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFFFDE8E8))
+                                ) { Icon(Icons.Outlined.Stop, "Hentikan", tint = Color(0xFF9B1C1C)) }
+                            } else {
+                                FilledIconButton(
+                                    onClick = { val t = input; input = ""; vm.send(t) },
+                                    enabled = input.isNotBlank() && settings.model.isNotBlank(),
+                                    modifier = Modifier.size(52.dp)
+                                ) { Icon(Icons.Outlined.Send, "Kirim") }
+                            }
                         }
                     }
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        OutlinedTextField(value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f),
-                            placeholder = { Text("Kirim pesan…") }, maxLines = 5, shape = RoundedCornerShape(16.dp))
-                        Spacer(Modifier.width(8.dp))
-                        FilledIconButton(onClick = { val t=input; input=""; vm.send(t) }, enabled = input.isNotBlank() && !busy && settings.model.isNotBlank(),
-                            modifier = Modifier.size(52.dp)) { Icon(Icons.Outlined.Send, "Kirim") }
-                    }
                 }
-            }
-        }) { pad ->
+            }) { pad ->
             if (messages.isEmpty()) EmptyState(Modifier.padding(pad)) else {
                 Box(Modifier.fillMaxSize().padding(pad)) {
                     LazyColumn(
@@ -137,16 +159,10 @@ class MainActivity : ComponentActivity() {
                                     scope.launch { snackbarHostState.showSnackbar("Jawaban disalin") }
                                 },
                                 onRegenerate = {
-                                    val lastUser = messages.lastOrNull { it.role == "user" }
-                                    if (lastUser != null) {
-                                        vm.send(lastUser.content)
-                                    }
+                                    vm.regenerateLastResponse()
                                 },
                                 onRetry = {
-                                    val lastUser = messages.lastOrNull { it.role == "user" }
-                                    if (lastUser != null) {
-                                        vm.send(lastUser.content)
-                                    }
+                                    vm.retryLastResponse()
                                 }
                             )
                         }
@@ -277,16 +293,35 @@ class MainActivity : ComponentActivity() {
             if (roots.isEmpty()) {
                 Text("Belum ada folder yang dikonfigurasi di gateway.", color = Color.Gray)
             }
-            roots.forEach { root ->
-                Surface(color = Color.White, shape = RoundedCornerShape(12.dp), tonalElevation = 1.dp) {
-                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(root.name, fontWeight = FontWeight.SemiBold)
-                            Text(root.description, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                            Text("Akses: ${root.access}", style = MaterialTheme.typography.labelSmall, color = Accent)
-                            Text("Status: ${statuses[root.name] ?: "idle"}", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth().weight(1f, fill = false)
+            ) {
+                items(roots) { root ->
+                    val status = statuses[root.name] ?: "idle"
+                    val isRunning = status == "running"
+                    Surface(color = Color.White, shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Color(0xFFF0F0F0))) {
+                        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(root.name, fontWeight = FontWeight.SemiBold)
+                                Text(root.description, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                                    Icon(
+                                        if (root.access == "read-only") Icons.Outlined.Lock else Icons.Outlined.Edit,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = Accent
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(root.access, style = MaterialTheme.typography.labelSmall, color = Accent)
+                                }
+                                Text("Status: $status", style = MaterialTheme.typography.labelSmall, color = if (isRunning) Accent else Color.DarkGray, fontWeight = if (isRunning) FontWeight.Bold else FontWeight.Normal)
+                            }
+                            IconButton(onClick = { onScan(root.name) }, enabled = !isRunning) { 
+                                if (isRunning) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                else Icon(Icons.Outlined.Refresh, "Scan")
+                            }
                         }
-                        IconButton(onClick = { onScan(root.name) }) { Icon(Icons.Outlined.Refresh, "Scan") }
                     }
                 }
             }
@@ -298,24 +333,65 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun EditConfirmationDialog(edit: PendingEdit, onApprove:()->Unit, onReject:()->Unit) {
     AlertDialog(onDismissRequest = {}, confirmButton = {
-        Button(onClick = onApprove, colors = ButtonDefaults.buttonColors(containerColor = Accent)) { Text("Setujui perubahan") }
+        Button(
+            onClick = onApprove, 
+            colors = ButtonDefaults.buttonColors(containerColor = Accent),
+            modifier = Modifier.heightIn(min = 48.dp)
+        ) { Text("Setujui perubahan") }
     }, dismissButton = {
-        TextButton(onClick = onReject) { Text("Tolak") }
+        TextButton(onClick = onReject, modifier = Modifier.heightIn(min = 48.dp)) { Text("Tolak") }
     }, title = { Text("AI ingin mengedit file") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Diff perubahan:", fontWeight = FontWeight.SemiBold)
-            Surface(color = Color(0xFFF0F0F0), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
-                Text(edit.diff, Modifier.padding(8.dp), fontSize = 11.sp, fontFamily = FontFamily.Monospace, lineHeight = 14.sp)
+            Surface(
+                color = Color(0xFFF7F7F7),
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, Color(0xFFE6E5E3)),
+                modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)
+            ) {
+                Box(Modifier.verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
+                    Column(Modifier.padding(12.dp)) {
+                        edit.diff.split("\n").forEach { line ->
+                            val color = when {
+                                line.startsWith("+") -> Color(0xFF2D7D46)
+                                line.startsWith("-") -> Color(0xFFD32F2F)
+                                line.startsWith("@@") -> Color(0xFF6A6A6A)
+                                else -> Ink
+                            }
+                            val bgColor = when {
+                                line.startsWith("+") -> Color(0xFFE6F4EA)
+                                line.startsWith("-") -> Color(0xFFFDE8E8)
+                                else -> Color.Transparent
+                            }
+                            Text(
+                                text = line,
+                                color = color,
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Monospace,
+                                lineHeight = 16.sp,
+                                modifier = Modifier.fillMaxWidth().background(bgColor)
+                            )
+                        }
+                    }
+                }
             }
-            Text("Backup (.bak) akan dibuat secara otomatis.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+            Text("Backup bertimestamp (.bak) akan dibuat secara otomatis.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
         }
     })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable fun SettingsSheet(initial: AppSettings, models: List<String>, status: String, onDismiss:()->Unit, onSave:(AppSettings)->Unit, onTest:()->Unit) {
+@Composable fun SettingsSheet(initial: AppSettings, models: List<String>, status: String, onDismiss:()->Unit, onSave:(AppSettings)->Unit, onTest:(AppSettings)->Unit) {
     var s by remember(initial) { mutableStateOf(initial) }
     var expanded by remember { mutableStateOf(false) }
+    var showToken by remember { mutableStateOf(false) }
+
+    LaunchedEffect(s.chatMode) {
+        if (s.chatMode == ChatMode.CHAT) {
+            s = s.copy(allowEdits = false)
+        }
+    }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Mode Percakapan", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -332,7 +408,21 @@ class MainActivity : ComponentActivity() {
 
             Text("Koneksi gateway", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             OutlinedTextField(s.gatewayUrl, { s=s.copy(gatewayUrl=it) }, label={Text("Alamat (http://IP:PORT)")}, modifier=Modifier.fillMaxWidth(), singleLine=true)
-            OutlinedTextField(s.token, { s=s.copy(token=it) }, label={Text("Token")}, modifier=Modifier.fillMaxWidth(), singleLine=true)
+            
+            OutlinedTextField(
+                value = s.token,
+                onValueChange = { s = s.copy(token = it) },
+                label = { Text("Token") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { showToken = !showToken }) {
+                        Icon(if (showToken) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility, null)
+                    }
+                }
+            )
+
             ExposedDropdownMenuBox(expanded, { expanded=!expanded }) {
                 OutlinedTextField(s.model, {}, readOnly=true, label={Text("Model")}, trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded)}, modifier=Modifier.menuAnchor().fillMaxWidth())
                 ExposedDropdownMenu(expanded, {expanded=false}) { models.forEach { model -> DropdownMenuItem({Text(model)}, { s=s.copy(model=model); expanded=false }) } }
@@ -349,9 +439,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            Text(status, style=MaterialTheme.typography.labelMedium)
+            Text(status, style=MaterialTheme.typography.labelMedium, color = if (status.contains("Gagal") || status.contains("tidak valid")) Color(0xFFD32F2F) else Color.Unspecified)
             Button(onClick={onSave(s)}, modifier=Modifier.fillMaxWidth().height(50.dp)) { Text("Simpan & Hubungkan") }
-            TextButton(onClick=onTest, modifier=Modifier.fillMaxWidth()) { Text("Uji Koneksi") }
+            TextButton(onClick={onTest(s)}, modifier=Modifier.fillMaxWidth()) { Text("Uji Koneksi") }
             Spacer(Modifier.height(24.dp))
         }
     }

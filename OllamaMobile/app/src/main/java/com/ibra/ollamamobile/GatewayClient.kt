@@ -12,52 +12,104 @@ import java.net.URL
 class GatewayClient {
     private fun connection(url: String, token: String): HttpURLConnection =
         (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 8_000
+            connectTimeout = 10_000
             readTimeout = 180_000
             setRequestProperty("Authorization", "Bearer $token")
             setRequestProperty("Content-Type", "application/json")
         }
 
     suspend fun models(settings: AppSettings): List<String> = withContext(Dispatchers.IO) {
-        val c = connection("${settings.gatewayUrl.trimEnd('/')}/models", settings.token)
-        c.requestMethod = "GET"
-        if (c.responseCode != 200) throw Exception("HTTP ${c.responseCode}")
-        val body = c.inputStream.bufferedReader().use { it.readText() }
-        val arr = JSONObject(body).getJSONArray("models")
-        (0 until arr.length()).map { arr.getJSONObject(it).getString("name") }
+        var c: HttpURLConnection? = null
+        try {
+            c = connection("${settings.gatewayUrl.trimEnd('/')}/models", settings.token)
+            c.requestMethod = "GET"
+            if (c.responseCode != 200) {
+                val err = c.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP ${c.responseCode}"
+                throw Exception(err)
+            }
+            val body = c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val arr = JSONObject(body).getJSONArray("models")
+            (0 until arr.length()).map { arr.getJSONObject(it).getString("name") }
+        } finally {
+            c?.disconnect()
+        }
     }
 
     suspend fun getRoots(settings: AppSettings): Pair<List<FileRoot>, Map<String, String>> = withContext(Dispatchers.IO) {
-        val c = connection("${settings.gatewayUrl.trimEnd('/')}/roots", settings.token)
-        c.requestMethod = "GET"
-        if (c.responseCode != 200) throw Exception("HTTP ${c.responseCode}")
-        val body = c.inputStream.bufferedReader().use { it.readText() }
-        val json = JSONObject(body)
-        val rootsArr = json.getJSONArray("roots")
-        val roots = (0 until rootsArr.length()).map {
-            val o = rootsArr.getJSONObject(it)
-            FileRoot(o.getString("name"), o.getString("description"), o.getString("access"))
+        var c: HttpURLConnection? = null
+        try {
+            c = connection("${settings.gatewayUrl.trimEnd('/')}/roots", settings.token)
+            c.requestMethod = "GET"
+            if (c.responseCode != 200) throw Exception("HTTP ${c.responseCode}")
+            val body = c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val json = JSONObject(body)
+            val rootsArr = json.getJSONArray("roots")
+            val roots = (0 until rootsArr.length()).map {
+                val o = rootsArr.getJSONObject(it)
+                FileRoot(o.getString("name"), o.getString("description"), o.getString("access"))
+            }
+            val statusJson = json.getJSONObject("status")
+            val statuses = statusJson.keys().asSequence().associateWith { statusJson.getString(it) }
+            roots to statuses
+        } finally {
+            c?.disconnect()
         }
-        val statusJson = json.getJSONObject("status")
-        val statuses = statusJson.keys().asSequence().associateWith { statusJson.getString(it) }
-        roots to statuses
+    }
+
+    suspend fun getScanStatus(settings: AppSettings, alias: String): String = withContext(Dispatchers.IO) {
+        var c: HttpURLConnection? = null
+        try {
+            val encodedAlias = java.net.URLEncoder.encode(alias, "UTF-8")
+            c = connection("${settings.gatewayUrl.trimEnd('/')}/roots/$encodedAlias/scan-status", settings.token)
+            c.requestMethod = "GET"
+            if (c.responseCode != 200) throw Exception("HTTP ${c.responseCode}")
+            val body = c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            JSONObject(body).getString("status")
+        } finally {
+            c?.disconnect()
+        }
     }
 
     suspend fun scanRoot(settings: AppSettings, alias: String) = withContext(Dispatchers.IO) {
-        val c = connection("${settings.gatewayUrl.trimEnd('/')}/roots/$alias/scan", settings.token)
-        c.requestMethod = "POST"
-        if (c.responseCode !in 200..299) throw Exception("HTTP ${c.responseCode}")
+        var c: HttpURLConnection? = null
+        try {
+            val encodedAlias = java.net.URLEncoder.encode(alias, "UTF-8")
+            c = connection("${settings.gatewayUrl.trimEnd('/')}/roots/$encodedAlias/scan", settings.token)
+            c.requestMethod = "POST"
+            if (c.responseCode !in 200..299) throw Exception("HTTP ${c.responseCode}")
+        } finally {
+            c?.disconnect()
+        }
     }
 
-    suspend fun respondToEdit(settings: AppSettings, editId: String, approve: Boolean): String = withContext(Dispatchers.IO) {
-        val action = if (approve) "approve" else "reject"
-        val c = connection("${settings.gatewayUrl.trimEnd('/')}/edits/$editId/$action", settings.token)
-        c.requestMethod = "POST"
-        val stream = if (c.responseCode in 200..299) c.inputStream else c.errorStream
-        val res = stream.bufferedReader().use { it.readText() }
-        val json = JSONObject(res)
-        if (c.responseCode in 200..299) json.getString("message")
-        else throw Exception(json.optString("error", "Unknown error"))
+    suspend fun respondToEdit(
+        settings: AppSettings,
+        editId: String,
+        approve: Boolean,
+        onEvent: (type: String, text: String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        var c: HttpURLConnection? = null
+        try {
+            val action = if (approve) "approve" else "reject"
+            val encodedId = java.net.URLEncoder.encode(editId, "UTF-8")
+            c = connection("${settings.gatewayUrl.trimEnd('/')}/edits/$encodedId/$action", settings.token)
+            c.requestMethod = "POST"
+            
+            if (c.responseCode !in 200..299) {
+                val errBody = c.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val errMsg = try { JSONObject(errBody).getString("error") } catch (e: Exception) { "HTTP ${c.responseCode}: $errBody" }
+                throw Exception(errMsg)
+            }
+            
+            BufferedReader(InputStreamReader(c.inputStream, Charsets.UTF_8)).useLines { lines ->
+                lines.filter { it.isNotBlank() }.forEach { line ->
+                    val event = JSONObject(line)
+                    onEvent(event.optString("type", "error"), event.optString("text", ""))
+                }
+            }
+        } finally {
+            c?.disconnect()
+        }
     }
 
     suspend fun chat(
@@ -65,32 +117,42 @@ class GatewayClient {
         messages: List<ChatMessage>,
         onEvent: (type: String, text: String) -> Unit
     ) = withContext(Dispatchers.IO) {
-        val c = connection("${settings.gatewayUrl.trimEnd('/')}/chat", settings.token)
-        c.requestMethod = "POST"
-        c.doOutput = true
-        val items = JSONArray()
-        messages.forEach { items.put(JSONObject().put("role", it.role).put("content", it.content)) }
-        val body = JSONObject()
-            .put("model", settings.model)
-            .put("messages", items)
-            .put("mode", settings.chatMode.name.lowercase())
-            .put("allow_edits", settings.allowEdits)
-        c.outputStream.use { it.write(body.toString().toByteArray()) }
-        if (c.responseCode !in 200..299) {
-            val errBody = c.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            val errMsg = try {
-                JSONObject(errBody).getString("error")
-            } catch (e: Exception) {
-                "HTTP ${c.responseCode}: $errBody"
+        var c: HttpURLConnection? = null
+        try {
+            c = connection("${settings.gatewayUrl.trimEnd('/')}/chat", settings.token)
+            c.requestMethod = "POST"
+            c.doOutput = true
+            val items = JSONArray()
+            messages.forEach { 
+                // Don't send internal fields to gateway
+                items.put(JSONObject().put("role", it.role).put("content", it.content)) 
             }
-            throw Exception(errMsg)
-        }
-        BufferedReader(InputStreamReader(c.inputStream)).useLines { lines ->
-            lines.filter { it.isNotBlank() }.forEach { line ->
-                val event = JSONObject(line)
-                onEvent(event.optString("type", "error"), event.optString("text", ""))
+            val body = JSONObject()
+                .put("model", settings.model)
+                .put("messages", items)
+                .put("mode", settings.chatMode.name.lowercase())
+                .put("allow_edits", settings.chatMode == ChatMode.AGENT && settings.allowEdits)
+            
+            c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            
+            if (c.responseCode !in 200..299) {
+                val errBody = c.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val errMsg = try {
+                    JSONObject(errBody).getString("error")
+                } catch (e: Exception) {
+                    "HTTP ${c.responseCode}: $errBody"
+                }
+                throw Exception(errMsg)
             }
+            
+            BufferedReader(InputStreamReader(c.inputStream, Charsets.UTF_8)).useLines { lines ->
+                lines.filter { it.isNotBlank() }.forEach { line ->
+                    val event = JSONObject(line)
+                    onEvent(event.optString("type", "error"), event.optString("text", ""))
+                }
+            }
+        } finally {
+            c?.disconnect()
         }
-        c.disconnect()
     }
 }
